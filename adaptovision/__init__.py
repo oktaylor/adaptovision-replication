@@ -1,1 +1,1 @@
-from adaptovision import config  # noqa: F401
+"""AdaptoVision replication package."""
