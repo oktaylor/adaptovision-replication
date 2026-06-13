@@ -1,15 +1,7 @@
-ipython
-jupyterlab
-loguru
-matplotlib
-notebook
 numpy
-pandas
-pip
-pytest
-python-dotenv
-ruff
-scikit-learn
+pyyaml
 tqdm
-typer
--e .
+matplotlib
+scikit-learn
+pytest
+ruff
