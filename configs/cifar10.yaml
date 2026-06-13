@@ -1,0 +1,54 @@
+project:
+  name: adaptovision-cifar10
+  seed: 42
+  output_dir: outputs
+  figure_dir: reports/figures
+  runs_dir: outputs/runs
+  run_name: lr0.05_bs128
+data:
+  dataset: CIFAR10
+  data_dir: data/raw
+  num_classes: 10
+  image_size: 32
+  val_ratio: 0.1
+  num_workers: 4
+  pin_memory: true
+augmentation:
+  random_crop_padding: 4
+  random_rotation_degrees: 15
+  random_horizontal_flip: true
+model:
+  name: AdaptoVision
+  in_channels: 3
+  num_classes: 10
+  base_channels: 64
+  stage_channels:
+  - 64
+  - 128
+  - 256
+  - 512
+  blocks_per_stage:
+  - 2
+  - 2
+  - 2
+  - 2
+  dropout_rates:
+  - 0.3
+  - 0.35
+  - 0.4
+  - 0.5
+  activation: elu
+training:
+  epochs: 150
+  batch_size: 128
+  optimizer: sgd
+  learning_rate: 0.05
+  momentum: 0.9
+  weight_decay: 0.0005
+  grad_clip_norm: 5.0
+scheduler:
+  name: exponential
+  decay_factor: 0.99
+  decay_every_epochs: 12.4
+evaluation:
+  checkpoint: models/checkpoints/best.pt
