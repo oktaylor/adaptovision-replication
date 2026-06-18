@@ -7,29 +7,34 @@ from torch import nn
 
 from adaptovision.models.blocks import (
     ConvNormAct,
-    DownsampleBlock,
     EncoderStage,
+    EncoderTransition,
     HierarchicalSkipFusion,
 )
 
 
 class AdaptoVision(nn.Module):
-    """CNN architecture inspired by the AdaptoVision paper.
+    """AdaptoVision architecture following the paper-described structure.
 
-    This implementation focuses on the main architectural ideas:
-    enhanced residual units, depthwise separable blocks, and hierarchical
-    skip connections. It is designed for from-scratch CIFAR-10 replication.
+    Main components:
+        - Enhanced Residual Units with four convolution kernels and Block-2
+        - Block-2 with pointwise-depthwise-pointwise convolution
+        - Hierarchical skip fusion from the previous two stage outputs
+        - Stage transition using downsampling + GAP + reshape + 1x1 projection
+        - Progressive dropout and ELU activation
     """
 
     def __init__(
         self,
         in_channels: int = 3,
         num_classes: int = 10,
-        base_channels: int = 64,
-        stage_channels: list[int] | tuple[int, ...] = (64, 128, 256, 512),
+        base_channels: int = 20,
+        stage_channels: list[int] | tuple[int, ...] = (20, 40, 80, 154),
         blocks_per_stage: list[int] | tuple[int, ...] = (2, 2, 2, 2),
         dropout_rates: list[float] | tuple[float, ...] = (0.30, 0.35, 0.40, 0.50),
         activation: str = "elu",
+        depthwise_kernel_sizes: list[int] | tuple[int, ...] = (3, 5, 7, 7),
+        learnable_skip_weights: bool = True,
     ) -> None:
         super().__init__()
 
@@ -37,49 +42,72 @@ class AdaptoVision(nn.Module):
             raise ValueError("stage_channels and blocks_per_stage must have the same length.")
         if len(stage_channels) != len(dropout_rates):
             raise ValueError("stage_channels and dropout_rates must have the same length.")
+        if len(stage_channels) != len(depthwise_kernel_sizes):
+            raise ValueError("stage_channels and depthwise_kernel_sizes must have the same length.")
 
         self.stem = nn.Sequential(
-            ConvNormAct(in_channels, base_channels, kernel_size=3, activation=activation),
-            ConvNormAct(base_channels, stage_channels[0], kernel_size=3, activation=activation),
+            ConvNormAct(
+                in_channels,
+                base_channels,
+                kernel_size=3,
+                activation=activation,
+                use_activation=True,
+            ),
+            ConvNormAct(
+                base_channels,
+                stage_channels[0],
+                kernel_size=3,
+                activation=activation,
+                use_activation=True,
+            ),
         )
 
         self.stages = nn.ModuleList()
-        self.downsamples = nn.ModuleList()
+        self.transitions = nn.ModuleList()
         self.skip_fusions = nn.ModuleList()
 
-        for i, channels in enumerate(stage_channels):
+        for stage_idx, channels in enumerate(stage_channels):
             self.stages.append(
                 EncoderStage(
                     channels=channels,
-                    num_blocks=blocks_per_stage[i],
-                    dropout=dropout_rates[i],
+                    num_blocks=blocks_per_stage[stage_idx],
+                    depthwise_kernel_size=depthwise_kernel_sizes[stage_idx],
+                    dropout=dropout_rates[stage_idx],
                     activation=activation,
-                    kernel_size=3 if i < 2 else 5,
                 )
             )
 
-            if i < len(stage_channels) - 1:
-                self.downsamples.append(
-                    DownsampleBlock(
-                        in_channels=stage_channels[i],
-                        out_channels=stage_channels[i + 1],
+            if stage_idx < len(stage_channels) - 1:
+                self.transitions.append(
+                    EncoderTransition(
+                        in_channels=stage_channels[stage_idx],
+                        out_channels=stage_channels[stage_idx + 1],
                         activation=activation,
                     )
                 )
 
-            if i >= 1:
+            if stage_idx >= 1:
+                prev1_channels = stage_channels[stage_idx - 1]
+                prev2_channels = stage_channels[stage_idx - 2] if stage_idx >= 2 else None
+
                 self.skip_fusions.append(
                     HierarchicalSkipFusion(
-                        in_channels=stage_channels[i - 1],
-                        out_channels=stage_channels[i],
+                        prev1_channels=prev1_channels,
+                        prev2_channels=prev2_channels,
+                        out_channels=channels,
+                        activation=activation,
+                        learnable_weights=learnable_skip_weights,
                     )
                 )
 
-        self.pool = nn.AdaptiveAvgPool2d((1, 1))
-        self.classifier = nn.Sequential(
-            nn.Flatten(),
-            nn.Dropout(p=0.2),
-            nn.Linear(stage_channels[-1], num_classes),
+        self.global_pool = nn.AdaptiveAvgPool2d((1, 1))
+
+        # Paper-style final projection after global aggregation.
+        self.classifier = nn.Conv2d(
+            stage_channels[-1],
+            num_classes,
+            kernel_size=1,
+            bias=True,
         )
 
         self._init_weights()
@@ -87,32 +115,49 @@ class AdaptoVision(nn.Module):
     def _init_weights(self) -> None:
         for module in self.modules():
             if isinstance(module, nn.Conv2d):
-                nn.init.kaiming_normal_(module.weight, mode="fan_out", nonlinearity="relu")
+                nn.init.kaiming_normal_(
+                    module.weight,
+                    mode="fan_out",
+                    nonlinearity="relu",
+                )
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+
             elif isinstance(module, nn.BatchNorm2d):
                 nn.init.ones_(module.weight)
-                nn.init.zeros_(module.bias)
-            elif isinstance(module, nn.Linear):
-                nn.init.normal_(module.weight, mean=0.0, std=0.01)
                 nn.init.zeros_(module.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.stem(x)
 
-        previous = None
-        for i, stage in enumerate(self.stages):
+        stage_outputs: list[torch.Tensor] = []
+
+        for stage_idx, stage in enumerate(self.stages):
             x = stage(x)
 
-            if previous is not None:
-                fusion = self.skip_fusions[i - 1](previous, x)
-                x = x + fusion
+            # Hierarchical skip fusion from previous two stage outputs.
+            if stage_idx >= 1:
+                prev1 = stage_outputs[-1]
+                prev2 = stage_outputs[-2] if len(stage_outputs) >= 2 else None
 
-            previous = x
+                skip = self.skip_fusions[stage_idx - 1](
+                    prev1=prev1,
+                    prev2=prev2,
+                    target_size=x.shape[-2:],
+                )
 
-            if i < len(self.downsamples):
-                x = self.downsamples[i](x)
+                x = x + skip
 
-        x = self.pool(x)
-        return self.classifier(x)
+            stage_outputs.append(x)
+
+            if stage_idx < len(self.transitions):
+                x = self.transitions[stage_idx](x)
+
+        x = self.global_pool(x)
+        x = self.classifier(x)
+        x = torch.flatten(x, start_dim=1)
+
+        return x
 
 
 def count_parameters(model: nn.Module) -> int:

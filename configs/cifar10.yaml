@@ -4,7 +4,8 @@ project:
   output_dir: outputs
   figure_dir: reports/figures
   runs_dir: outputs/runs
-  run_name: lr0.05_bs128
+  run_name: paper32_lr0.175_bs128_w154
+
 data:
   dataset: CIFAR10
   data_dir: data/raw
@@ -13,42 +14,83 @@ data:
   val_ratio: 0.1
   num_workers: 4
   pin_memory: true
+
 augmentation:
-  random_crop_padding: 4
-  random_rotation_degrees: 15
+  # Paper-style CIFAR augmentation:
+  # random crop 26x26 -> resize back to 32x32
+  random_resized_crop_size: 26
+
+  # horizontal flipping
   random_horizontal_flip: true
+
+  # rotation range: -60 to +60 degrees
+  random_rotation_degrees: 60
+
+  # affine shearing range reported in the paper
+  random_affine_shear:
+    - -0.05
+    - 0.25
+
 model:
   name: AdaptoVision
   in_channels: 3
   num_classes: 10
-  base_channels: 64
+
+  # Width chosen to target the paper's ~6.6M parameter scale.
+  # Do not use 64-128-256-512 here; that gives ~10M+ params.
+  base_channels: 20
   stage_channels:
-  - 64
-  - 128
-  - 256
-  - 512
+    - 20
+    - 40
+    - 80
+    - 154
+
   blocks_per_stage:
-  - 2
-  - 2
-  - 2
-  - 2
+    - 2
+    - 2
+    - 2
+    - 2
+
+  # Paper: progressive dropout 0.3 -> 0.5
   dropout_rates:
-  - 0.3
-  - 0.35
-  - 0.4
-  - 0.5
+    - 0.3
+    - 0.35
+    - 0.4
+    - 0.5
+
   activation: elu
+
+  # Paper mentions kernel sizes from 3x3, 5x5, 7x7 depending on resolution.
+  depthwise_kernel_sizes:
+    - 3
+    - 5
+    - 7
+    - 7
+
+  learnable_skip_weights: true
+
 training:
-  epochs: 150
+  epochs: 200
   batch_size: 128
   optimizer: sgd
-  learning_rate: 0.05
+
+  # Paper initial LR
+  learning_rate: 0.175
+
+  # Not explicitly specified in the paper; kept as standard CIFAR SGD setting.
   momentum: 0.9
   weight_decay: 0.0005
-  grad_clip_norm: 5.0
+
+  # Paper does not mention gradient clipping.
+  grad_clip_norm: null
+
+  # Paper does not mention Nesterov.
+  nesterov: false
+
 scheduler:
   name: exponential
   decay_factor: 0.99
   decay_every_epochs: 12.4
+
 evaluation:
   checkpoint: models/checkpoints/best.pt
