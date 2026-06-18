@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import torch
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, Subset
 from torchvision import datasets, transforms
 
 
@@ -21,7 +21,17 @@ def build_transforms(config: dict, train: bool = True) -> transforms.Compose:
         aug_cfg = config.get("augmentation", {})
         transform_list = []
 
-        if aug_cfg.get("random_crop_padding", 0) > 0:
+        # Paper-style random crop:
+        # CIFAR 32x32 -> random crop 26x26 -> resize back to 32x32.
+        crop_size = aug_cfg.get("random_resized_crop_size", None)
+        if crop_size is not None:
+            transform_list.extend(
+                [
+                    transforms.RandomCrop(crop_size),
+                    transforms.Resize((image_size, image_size)),
+                ]
+            )
+        elif aug_cfg.get("random_crop_padding", 0) > 0:
             transform_list.append(
                 transforms.RandomCrop(
                     image_size,
@@ -33,8 +43,17 @@ def build_transforms(config: dict, train: bool = True) -> transforms.Compose:
             transform_list.append(transforms.RandomHorizontalFlip())
 
         rotation = aug_cfg.get("random_rotation_degrees", 0)
-        if rotation > 0:
-            transform_list.append(transforms.RandomRotation(rotation))
+        shear = aug_cfg.get("random_affine_shear", None)
+
+        # Use RandomAffine so rotation and affine shear are applied together.
+        # Note: torchvision's shear argument is interpreted in degrees.
+        if rotation > 0 or shear is not None:
+            transform_list.append(
+                transforms.RandomAffine(
+                    degrees=(-rotation, rotation) if rotation > 0 else 0,
+                    shear=shear,
+                )
+            )
 
         transform_list.extend(
             [
@@ -42,8 +61,10 @@ def build_transforms(config: dict, train: bool = True) -> transforms.Compose:
                 transforms.Normalize(CIFAR10_MEAN, CIFAR10_STD),
             ]
         )
+
         return transforms.Compose(transform_list)
 
+    # Validation/test: no augmentation.
     return transforms.Compose(
         [
             transforms.ToTensor(),
@@ -62,31 +83,50 @@ def build_dataloaders(config: dict) -> tuple[DataLoader, DataLoader, DataLoader]
     pin_memory = config["data"].get("pin_memory", True)
 
     train_transform = build_transforms(config, train=True)
-    test_transform = build_transforms(config, train=False)
+    eval_transform = build_transforms(config, train=False)
 
-    full_train_dataset = datasets.CIFAR10(
+    # Make two CIFAR-10 train datasets with different transforms.
+    # The train split uses augmentation.
+    train_dataset_full = datasets.CIFAR10(
         root=str(data_dir),
         train=True,
         transform=train_transform,
         download=True,
     )
 
+    # The validation split uses eval transform only.
+    val_dataset_full = datasets.CIFAR10(
+        root=str(data_dir),
+        train=True,
+        transform=eval_transform,
+        download=True,
+    )
+
     test_dataset = datasets.CIFAR10(
         root=str(data_dir),
         train=False,
-        transform=test_transform,
+        transform=eval_transform,
         download=True,
     )
 
     val_ratio = config["data"].get("val_ratio", 0.1)
-    val_size = int(len(full_train_dataset) * val_ratio)
-    train_size = len(full_train_dataset) - val_size
+    num_train_total = len(train_dataset_full)
+
+    val_size = int(num_train_total * val_ratio)
+    train_size = num_train_total - val_size
 
     generator = torch.Generator().manual_seed(config["project"].get("seed", 42))
-    train_dataset, val_dataset = random_split(
-        full_train_dataset,
-        [train_size, val_size],
-        generator=generator,
+    indices = torch.randperm(num_train_total, generator=generator).tolist()
+
+    train_indices = indices[:train_size]
+    val_indices = indices[train_size:]
+
+    train_dataset = Subset(train_dataset_full, train_indices)
+    val_dataset = Subset(val_dataset_full, val_indices)
+
+    print(
+        f"Dataset split: train={len(train_dataset)}, "
+        f"val={len(val_dataset)}, test={len(test_dataset)}"
     )
 
     train_loader = DataLoader(
