@@ -14,14 +14,15 @@ from adaptovision.models.blocks import (
 
 
 class AdaptoVision(nn.Module):
-    """AdaptoVision architecture following the paper-described structure.
+    """AdaptoVision model implementation for CIFAR-style image classification.
 
     Main components:
-        - Enhanced Residual Units with four convolution kernels and Block-2
-        - Block-2 with pointwise-depthwise-pointwise convolution
-        - Hierarchical skip fusion from the previous two stage outputs
-        - Stage transition using downsampling + GAP + reshape + 1x1 projection
-        - Progressive dropout and ELU activation
+    - Lightweight Block-1 / ERU-inspired stage blocks
+    - Eq. (5)-based Block-2 with pointwise-depthwise-pointwise convolution
+    - Hierarchical skip fusion from the previous two stage outputs
+    - Stage transition using downsampling + GAP + 1x1 projection
+    - Fixed channel schedule selected to match the reported ~6.6M parameter scale
+    - Progressive dropout and ELU activation outside the strict sigma=BN paths
     """
 
     def __init__(

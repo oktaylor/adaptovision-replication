@@ -182,7 +182,7 @@ class Block1(nn.Module):
             channels,
             kernel_size=1,
             activation=activation,
-            use_activation=True,
+            use_activation=False,
         )
 
         # W2: spatial convolution
@@ -253,20 +253,17 @@ class Block1(nn.Module):
 
 
 class Block2(nn.Module):
-    """AdaptoVision Block-2, equation (5)-based implementation.
+    """AdaptoVision Block-2, Eq. (5)-based.
 
-    Paper equation:
-        B2(z) = sigma(Wb * D(sigma(Wa * z)))
+    Strict interpretation:
+        sigma = BatchNorm
+        Wa, Wb = 1x1 pointwise conv
+        D = depthwise conv
 
-    Interpretation:
-        Wa: 1x1 pointwise convolution
-        D : depthwise convolution
-        Wb: 1x1 pointwise convolution
+    Flow:
+        PW-Conv -> BN -> DW-Conv -> BN -> PW-Conv -> BN -> Dropout
 
-    Important:
-        - No internal residual addition is used here.
-        - The residual connection is handled by the outer ERU / Block-1.
-        - Dropout is kept because Figure 1-C shows dropout at the end of Block-2.
+    No internal residual addition.
     """
 
     def __init__(
@@ -274,48 +271,29 @@ class Block2(nn.Module):
         channels: int,
         depthwise_kernel_size: int = 3,
         dropout: float = 0.0,
-        activation: str = "elu",
+        activation: str = "elu",  # kept for API compatibility, not used inside Block2
     ) -> None:
         super().__init__()
 
-        padding = depthwise_kernel_size // 2
-
-        # Wa: 1x1 pointwise convolution + BN + activation
-        self.pointwise_a = ConvNormAct(
+        self.pointwise_a = ConvBN(
             in_channels=channels,
             out_channels=channels,
             kernel_size=1,
-            stride=1,
             groups=1,
-            activation=activation,
-            use_activation=True,
         )
 
-        # D: depthwise convolution.
-        # Keep BN, but do not add another activation here because Eq. (5)
-        # only places sigma before Wa output and after Wb output.
-        self.depthwise = nn.Sequential(
-            nn.Conv2d(
-                in_channels=channels,
-                out_channels=channels,
-                kernel_size=depthwise_kernel_size,
-                stride=1,
-                padding=padding,
-                groups=channels,
-                bias=False,
-            ),
-            nn.BatchNorm2d(channels),
+        self.depthwise = ConvBN(
+            in_channels=channels,
+            out_channels=channels,
+            kernel_size=depthwise_kernel_size,
+            groups=channels,
         )
 
-        # Wb: 1x1 pointwise convolution + BN + activation
-        self.pointwise_b = ConvNormAct(
+        self.pointwise_b = ConvBN(
             in_channels=channels,
             out_channels=channels,
             kernel_size=1,
-            stride=1,
             groups=1,
-            activation=activation,
-            use_activation=True,
         )
 
         self.dropout = nn.Dropout2d(p=dropout)
@@ -325,92 +303,7 @@ class Block2(nn.Module):
         out = self.depthwise(out)
         out = self.pointwise_b(out)
         out = self.dropout(out)
-
         return out
-
-
-class EnhancedResidualUnit(nn.Module):
-    """Enhanced Residual Unit following the AdaptoVision paper.
-
-    Paper form:
-        y_l = x_{l-1} + T(x_{l-1})
-
-        T(x) = sigma W4 * (
-                   sigma W3 * B2(
-                       sigma W2 * (
-                           sigma W1 * x
-                       )
-                   )
-               )
-
-    This implementation uses:
-        W1: 1x1 conv
-        W2: kxk conv
-        B2: pointwise-depthwise-pointwise block
-        W3: kxk conv
-        W4: 1x1 conv
-    """
-
-    def __init__(
-        self,
-        channels: int,
-        depthwise_kernel_size: int = 3,
-        dropout: float = 0.0,
-        activation: str = "elu",
-    ) -> None:
-        super().__init__()
-
-        self.w1 = ConvNormAct(
-            channels,
-            channels,
-            kernel_size=1,
-            activation=activation,
-            use_activation=True,
-        )
-
-        self.w2 = ConvNormAct(
-            channels,
-            channels,
-            kernel_size=depthwise_kernel_size,
-            activation=activation,
-            use_activation=True,
-        )
-
-        self.block2 = Block2(
-            channels=channels,
-            depthwise_kernel_size=depthwise_kernel_size,
-            dropout=dropout,
-            activation=activation,
-        )
-
-        self.w3 = ConvNormAct(
-            channels,
-            channels,
-            kernel_size=depthwise_kernel_size,
-            activation=activation,
-            use_activation=True,
-        )
-
-        self.w4 = ConvNormAct(
-            channels,
-            channels,
-            kernel_size=1,
-            activation=activation,
-            use_activation=False,
-        )
-
-        self.dropout = nn.Dropout2d(p=dropout)
-        self.activation = get_activation(activation)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        transform = self.w1(x)
-        transform = self.w2(transform)
-        transform = self.block2(transform)
-        transform = self.w3(transform)
-        transform = self.w4(transform)
-        transform = self.dropout(transform)
-
-        return self.activation(x + transform)
 
 
 class EncoderStage(nn.Module):
