@@ -120,7 +120,7 @@ def build_optimizer(config: dict, model: nn.Module) -> torch.optim.Optimizer:
         lr=train_cfg["learning_rate"],
         momentum=train_cfg["momentum"],
         weight_decay=train_cfg["weight_decay"],
-        nesterov=True,
+        nesterov=train_cfg.get("nesterov", False),
     )
 
 
