@@ -76,19 +76,93 @@ class ConvNormAct(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.block(x)
 
+class ConvBN(nn.Module):
+    """Convolution + BatchNorm without activation.
 
-class Block2(nn.Module):
-    """AdaptoVision Block-2.
+    This helper is used to approximate the CN / CN_BN units in Figure 1-D.
+    Activations are applied explicitly at the places where Figure 1-D shows
+    an Activation block.
+    """
 
-    Paper form:
-        B2(z) = sigma(Wb * D(sigma(Wa * z)))
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int = 3,
+        stride: int = 1,
+        groups: int = 1,
+    ) -> None:
+        super().__init__()
 
-    where:
-        Wa, Wb: 1x1 pointwise convolutions
-        D: depthwise convolution
+        padding = kernel_size // 2
 
-    The paper figure also presents Block-2 as residual-compatible, so this
-    implementation keeps an internal residual addition when shape is unchanged.
+        self.block = nn.Sequential(
+            nn.Conv2d(
+                in_channels,
+                out_channels,
+                kernel_size=kernel_size,
+                stride=stride,
+                padding=padding,
+                groups=groups,
+                bias=False,
+            ),
+            nn.BatchNorm2d(out_channels),
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.block(x)
+
+
+class ConvConvBN(nn.Module):
+    """Approximation of the CN-CN_BN units shown in Figure 1-D.
+
+    Flow:
+        Conv-BN -> activation -> Conv-BN
+
+    The second conv does not include activation because the residual ADD or
+    explicit Activation block comes after it in Figure 1-D.
+    """
+
+    def __init__(
+        self,
+        channels: int,
+        kernel_size: int = 3,
+        activation: str = "elu",
+    ) -> None:
+        super().__init__()
+
+        self.conv1 = ConvBN(
+            channels,
+            channels,
+            kernel_size=kernel_size,
+        )
+        self.activation = get_activation(activation)
+        self.conv2 = ConvBN(
+            channels,
+            channels,
+            kernel_size=kernel_size,
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.conv1(x)
+        x = self.activation(x)
+        x = self.conv2(x)
+        return x
+
+
+class Block1(nn.Module):
+    """Lightweight Figure 1-D style Block-1.
+
+    This block keeps the main Figure 1-D idea:
+        - multiple internal additions
+        - Block2 in the middle
+        - final long skip from the original input
+
+    But it follows the paper's ERU formula more closely:
+        W1 -> W2 -> Block2 -> W3 -> W4
+
+    Therefore it avoids the parameter explosion caused by using five
+    full ConvConvBN modules.
     """
 
     def __init__(
@@ -100,7 +174,10 @@ class Block2(nn.Module):
     ) -> None:
         super().__init__()
 
-        self.pointwise_a = ConvNormAct(
+        k = depthwise_kernel_size
+
+        # W1: pointwise projection
+        self.w1 = ConvNormAct(
             channels,
             channels,
             kernel_size=1,
@@ -108,16 +185,34 @@ class Block2(nn.Module):
             use_activation=True,
         )
 
-        self.depthwise = ConvNormAct(
+        # W2: spatial convolution
+        self.w2 = ConvNormAct(
             channels,
             channels,
-            kernel_size=depthwise_kernel_size,
-            groups=channels,
+            kernel_size=k,
             activation=activation,
-            use_activation=True,
+            use_activation=False,
         )
 
-        self.pointwise_b = ConvNormAct(
+        # Block2: pointwise -> depthwise -> pointwise
+        self.block2 = Block2(
+            channels=channels,
+            depthwise_kernel_size=k,
+            dropout=dropout,
+            activation=activation,
+        )
+
+        # W3: spatial convolution after Block2
+        self.w3 = ConvNormAct(
+            channels,
+            channels,
+            kernel_size=k,
+            activation=activation,
+            use_activation=False,
+        )
+
+        # W4: final projection
+        self.w4 = ConvNormAct(
             channels,
             channels,
             kernel_size=1,
@@ -125,8 +220,105 @@ class Block2(nn.Module):
             use_activation=False,
         )
 
+        self.mid_activation = get_activation(activation)
+        self.final_activation = get_activation(activation)
         self.dropout = nn.Dropout2d(p=dropout)
-        self.activation = get_activation(activation)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        identity = x
+
+        # First local skip:
+        # x1 = x + W2(W1(x))
+        h = self.w1(x)
+        h = self.w2(h)
+        x1 = x + h
+
+        # Middle skip with Block2:
+        # x2 = x1 + W3(Block2(x1))
+        h = self.block2(x1)
+        h = self.w3(h)
+        x2 = self.mid_activation(x1 + h)
+
+        # Later local transform using W4:
+        # x3 = x2 + W4(x2)
+        h = self.w4(x2)
+        x3 = x2 + h
+
+        # Final activation/dropout and long skip from original input.
+        h = self.final_activation(x3)
+        h = self.dropout(h)
+
+        out = identity + h
+        return out
+
+
+class Block2(nn.Module):
+    """AdaptoVision Block-2, equation (5)-based implementation.
+
+    Paper equation:
+        B2(z) = sigma(Wb * D(sigma(Wa * z)))
+
+    Interpretation:
+        Wa: 1x1 pointwise convolution
+        D : depthwise convolution
+        Wb: 1x1 pointwise convolution
+
+    Important:
+        - No internal residual addition is used here.
+        - The residual connection is handled by the outer ERU / Block-1.
+        - Dropout is kept because Figure 1-C shows dropout at the end of Block-2.
+    """
+
+    def __init__(
+        self,
+        channels: int,
+        depthwise_kernel_size: int = 3,
+        dropout: float = 0.0,
+        activation: str = "elu",
+    ) -> None:
+        super().__init__()
+
+        padding = depthwise_kernel_size // 2
+
+        # Wa: 1x1 pointwise convolution + BN + activation
+        self.pointwise_a = ConvNormAct(
+            in_channels=channels,
+            out_channels=channels,
+            kernel_size=1,
+            stride=1,
+            groups=1,
+            activation=activation,
+            use_activation=True,
+        )
+
+        # D: depthwise convolution.
+        # Keep BN, but do not add another activation here because Eq. (5)
+        # only places sigma before Wa output and after Wb output.
+        self.depthwise = nn.Sequential(
+            nn.Conv2d(
+                in_channels=channels,
+                out_channels=channels,
+                kernel_size=depthwise_kernel_size,
+                stride=1,
+                padding=padding,
+                groups=channels,
+                bias=False,
+            ),
+            nn.BatchNorm2d(channels),
+        )
+
+        # Wb: 1x1 pointwise convolution + BN + activation
+        self.pointwise_b = ConvNormAct(
+            in_channels=channels,
+            out_channels=channels,
+            kernel_size=1,
+            stride=1,
+            groups=1,
+            activation=activation,
+            use_activation=True,
+        )
+
+        self.dropout = nn.Dropout2d(p=dropout)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         out = self.pointwise_a(x)
@@ -134,7 +326,7 @@ class Block2(nn.Module):
         out = self.pointwise_b(out)
         out = self.dropout(out)
 
-        return self.activation(x + out)
+        return out
 
 
 class EnhancedResidualUnit(nn.Module):
@@ -222,7 +414,7 @@ class EnhancedResidualUnit(nn.Module):
 
 
 class EncoderStage(nn.Module):
-    """Stack of Enhanced Residual Units."""
+    """Stack of lightweight Figure 1-D style Block-1 modules."""
 
     def __init__(
         self,
@@ -236,7 +428,7 @@ class EncoderStage(nn.Module):
 
         self.blocks = nn.Sequential(
             *[
-                EnhancedResidualUnit(
+                Block1(
                     channels=channels,
                     depthwise_kernel_size=depthwise_kernel_size,
                     dropout=dropout,
@@ -251,16 +443,16 @@ class EncoderStage(nn.Module):
 
 
 class EncoderTransition(nn.Module):
-    """Stage transition with downsampling and global context projection.
+    """Stage transition with local downsampling and global context projection.
 
     Paper form:
-        x^{k+1} = S_k(Reshape(GAP(P_k(x^k))))
+        X_{k+1} = A(P(X_k)) + S(R(X_k))
 
-    To preserve spatial feature maps for later convolutional stages, this module
-    combines:
-        local downsampled feature map
-        +
-        broadcasted global context from GAP -> 1x1 projection
+    where:
+        P: spatial downsampling
+        A: local convolutional projection
+        R: global average pooling + reshape
+        S: 1x1 convolution for channel alignment
     """
 
     def __init__(
@@ -282,7 +474,7 @@ class EncoderTransition(nn.Module):
         )
 
         self.global_projection = ConvNormAct(
-            out_channels,
+            in_channels,
             out_channels,
             kernel_size=1,
             activation=activation,
@@ -292,10 +484,10 @@ class EncoderTransition(nn.Module):
         self.activation = get_activation(activation)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        local = self.downsample(x)
-        local = self.local_projection(local)
+        pooled = self.downsample(x)
+        local = self.local_projection(pooled)
 
-        global_context = F.adaptive_avg_pool2d(local, output_size=(1, 1))
+        global_context = F.adaptive_avg_pool2d(x, output_size=(1, 1))
         global_context = self.global_projection(global_context)
         global_context = global_context.expand_as(local)
 
