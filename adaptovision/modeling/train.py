@@ -140,6 +140,55 @@ def build_scheduler(config: dict, optimizer: torch.optim.Optimizer):
     )
 
 
+def set_optimizer_lr(optimizer: torch.optim.Optimizer, learning_rate: float) -> None:
+    """Set learning rate for all optimizer parameter groups."""
+    for param_group in optimizer.param_groups:
+        param_group["lr"] = learning_rate
+
+
+def compute_epoch_lr(config: dict, epoch: int) -> float:
+    """Compute epoch-level learning rate with optional linear warmup.
+
+    If training.warmup_epochs is not set or is 0, this function should not be used.
+    Warmup is applied first, then the configured exponential decay starts after warmup.
+    """
+    train_cfg = config["training"]
+    scheduler_cfg = config.get("scheduler", {})
+
+    base_lr = float(train_cfg["learning_rate"])
+    warmup_epochs = int(train_cfg.get("warmup_epochs", 0) or 0)
+    warmup_start_lr = float(train_cfg.get("warmup_start_lr", base_lr * 0.01))
+
+    if warmup_epochs <= 0:
+        return base_lr
+
+    if epoch <= warmup_epochs:
+        if warmup_epochs == 1:
+            return base_lr
+
+        alpha = (epoch - 1) / (warmup_epochs - 1)
+        return warmup_start_lr + alpha * (base_lr - warmup_start_lr)
+
+    scheduler_name = scheduler_cfg.get("name", "exponential").lower()
+
+    if scheduler_name == "exponential":
+        decay_factor = float(scheduler_cfg["decay_factor"])
+        decay_every_epochs = float(scheduler_cfg["decay_every_epochs"])
+        gamma_per_epoch = decay_factor ** (1.0 / decay_every_epochs)
+
+        # Epoch immediately after warmup gets one decay step.
+        decay_steps = epoch - warmup_epochs - 1
+        return base_lr * (gamma_per_epoch ** decay_steps)
+
+    if scheduler_name in {"none", "constant", "null"}:
+        return base_lr
+
+    raise ValueError(
+        f"Warmup is currently implemented for exponential/constant schedules only, "
+        f"but got scheduler.name={scheduler_name!r}."
+    )
+
+
 def train_one_epoch(
     model: nn.Module,
     loader,
@@ -275,6 +324,11 @@ def main() -> None:
     criterion = nn.CrossEntropyLoss()
     optimizer = build_optimizer(config, model)
     scheduler = build_scheduler(config, optimizer)
+    warmup_epochs = int(config["training"].get("warmup_epochs", 0) or 0)
+    use_manual_lr_schedule = warmup_epochs > 0
+
+    if use_manual_lr_schedule:
+        scheduler = None
 
     num_params = count_parameters(model)
 
@@ -292,7 +346,17 @@ def main() -> None:
     append_summary(summary_path, f"Device: {device}")
     append_summary(summary_path, f"Trainable parameters: {num_params:,}")
     append_summary(summary_path, f"Config copy: {paths['config_copy_path']}")
-
+    if use_manual_lr_schedule:
+        append_summary(
+            summary_path,
+            (
+                "LR schedule: manual linear warmup + configured decay | "
+                f"warmup_epochs={warmup_epochs}, "
+                f"warmup_start_lr={config['training'].get('warmup_start_lr')}, "
+                f"base_lr={config['training']['learning_rate']}"
+            ),
+        )
+    
     with open(metrics_path, "w", newline="", encoding="utf-8") as file:
         writer = csv.writer(file)
         writer.writerow(
@@ -317,7 +381,12 @@ def main() -> None:
     last_checkpoint_path = checkpoint_dir / "last.pt"
 
     for epoch in range(1, epochs + 1):
-        current_lr = optimizer.param_groups[0]["lr"]
+        if use_manual_lr_schedule:
+            current_lr = compute_epoch_lr(config, epoch)
+            set_optimizer_lr(optimizer, current_lr)
+        else:
+            current_lr = optimizer.param_groups[0]["lr"]
+
         print(f"\nEpoch {epoch}/{epochs} | lr={current_lr:.6f}")
 
         train_loss, train_acc = train_one_epoch(
@@ -337,7 +406,7 @@ def main() -> None:
             split="val",
         )
 
-        if scheduler is not None:
+        if scheduler is not None and not use_manual_lr_schedule:
             scheduler.step()
 
         save_checkpoint(
