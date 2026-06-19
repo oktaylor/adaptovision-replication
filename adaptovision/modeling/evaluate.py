@@ -37,6 +37,7 @@ def get_device() -> torch.device:
 
 def build_model(config: dict) -> AdaptoVision:
     model_cfg = config["model"]
+
     return AdaptoVision(
         in_channels=model_cfg["in_channels"],
         num_classes=model_cfg["num_classes"],
@@ -45,6 +46,8 @@ def build_model(config: dict) -> AdaptoVision:
         blocks_per_stage=model_cfg["blocks_per_stage"],
         dropout_rates=model_cfg["dropout_rates"],
         activation=model_cfg.get("activation", "elu"),
+        depthwise_kernel_sizes=model_cfg.get("depthwise_kernel_sizes", (3, 5, 7, 7)),
+        learnable_skip_weights=model_cfg.get("learnable_skip_weights", True),
     )
 
 
@@ -137,7 +140,7 @@ def main() -> None:
     model = build_model(config).to(device)
 
     checkpoint = torch.load(checkpoint_path, map_location=device)
-    model.load_state_dict(checkpoint["model_state_dict"])
+    model.load_state_dict(checkpoint["model_state_dict"], strict=True)
 
     test_loss, test_acc, preds, targets = collect_predictions(model, test_loader, device)
 
