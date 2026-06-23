@@ -1,0 +1,83 @@
+project:
+  name: adaptovision-cifar10
+  seed: 42
+  output_dir: outputs
+  figure_dir: reports/figures
+  runs_dir: outputs/runs
+  run_name: lr0030_mild_aug_800ep_bs512
+
+data:
+  dataset: CIFAR10
+  data_dir: data/raw
+  num_classes: 10
+  image_size: 32
+  val_ratio: 0.1
+  num_workers: 4
+  pin_memory: true
+
+augmentation:
+  random_resized_crop_size: 26
+
+  random_horizontal_flip: true
+
+  random_rotation_degrees: 15
+
+  random_affine_shear:
+    - -0.05
+    - 0.05
+
+model:
+  name: AdaptoVision
+  in_channels: 3
+  num_classes: 10
+
+  base_channels: 20
+  stage_channels:
+    - 20
+    - 40
+    - 80
+    - 154
+
+  blocks_per_stage:
+    - 2
+    - 2
+    - 2
+    - 2
+
+  dropout_rates:
+    - 0.3
+    - 0.35
+    - 0.4
+    - 0.5
+
+  activation: elu
+
+  depthwise_kernel_sizes:
+    - 3
+    - 5
+    - 7
+    - 7
+
+  learnable_skip_weights: true
+
+training:
+  epochs: 800
+  batch_size: 512
+  optimizer: sgd
+
+  learning_rate: 0.030
+
+  momentum: 0.9
+  weight_decay: 0.0005
+
+  grad_clip_norm: null
+
+  nesterov: false
+
+scheduler:
+  name: exponential
+  decay_factor: 0.99
+  decay_every_epochs: 12.4
+
+evaluation:
+  checkpoint: models/checkpoints/best.pt
