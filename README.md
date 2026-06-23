@@ -152,41 +152,6 @@ SLURM logs are saved under:
 outputs/slurm/
 ```
 
-## Optional: Passing CONFIG_PATH from the Command Line
-
-The current evaluation script supports passing `CONFIG_PATH` through `sbatch --export`.
-
-For example:
-
-```bash
-sbatch --export=ALL,CONFIG_PATH=configs/lr0030_mild_aug_drop_mid_800ep_bs256.yaml scripts/eval_cifar10.sh
-```
-
-For the training script, the safest method is to edit `CONFIG_PATH` inside `scripts/train_cifar10.sh` before submission. If `scripts/train_cifar10.sh` is modified to use an environment-variable fallback such as:
-
-```bash
-CONFIG_PATH="${CONFIG_PATH:-configs/cifar10.yaml}"
-```
-
-then training can also be launched with:
-
-```bash
-sbatch --export=ALL,CONFIG_PATH=configs/lr0030_mild_aug_drop_mid_800ep_bs256.yaml scripts/train_cifar10.sh
-```
-
-## Manual Training
-
-If running manually instead of using SLURM:
-
-```bash
-source .venv/bin/activate
-
-python -m adaptovision.modeling.train \
-  --config configs/cifar10.yaml
-```
-
-Replace `configs/cifar10.yaml` with the desired configuration file.
-
 ## Evaluation
 
 The main training script already runs test evaluation after training.
@@ -290,50 +255,6 @@ In this independent replication, the strict reported setting with the original l
 The best overall result was obtained with a modified setting using milder geometric augmentation, reduced dropout, and batch size 256.
 
 The best result remains below the paper-reported accuracy. The final report discusses likely reasons, including architectural ambiguity, missing implementation details, learning-rate sensitivity, augmentation strength, and regularization effects.
-
-## Reproducing the Main Experiment
-
-Clone the repository:
-
-```bash
-git clone https://github.com/oktaylor/adaptovision-replication.git
-cd adaptovision-replication
-```
-
-Create and activate the environment:
-
-```bash
-bash scripts/create_env.sh
-source .venv/bin/activate
-```
-
-Set the desired configuration file inside:
-
-```text
-scripts/train_cifar10.sh
-```
-
-Then submit the job:
-
-```bash
-sbatch scripts/train_cifar10.sh
-```
-
-After the job finishes, check:
-
-```text
-outputs/slurm/
-outputs/runs/
-```
-
-To summarize completed runs:
-
-```bash
-python scripts/analyze_runs.py \
-  --runs-dir outputs/runs \
-  --out outputs/analysis \
-  --top-k 8
-```
 
 ## Notes
 
